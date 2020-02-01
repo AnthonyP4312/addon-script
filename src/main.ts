@@ -1,47 +1,57 @@
-import axios from 'axios'
-import cheerio from 'cheerio'
-import fs from 'fs';
+import { promises as fs } from 'fs'
+import { getBuffer, getDocument } from './cheerioUtil'
+import log from 'loglevel'
+import compact from 'lodash/compact'
+import { paths } from './config'
+
+log.setLevel(0)
 
 interface Package {
-  id: number,
-  name: string,
-  downloadName: string
+  id: number
+  name: string
+  hasRetailVersion?: boolean
 }
 
+// TODO mkdirp around this
+const downloadDir = `${process.env.HOME}/.wow-addons/cache`
+
 const packageList: Package[] = [
-  {id: 25202, name: 'InFlightClassic', downloadName: "InFlight"}
+  { id: 24910, name: 'WeakAuras 2', hasRetailVersion: true },
+  // { id: 25178, name: 'AutoBiographer' },
 ]
 
-const downloadUrl = ({id, downloadName}: Package, version: string) =>
-  `https://cdn.wowinterface.com/downloads/file${id}/${downloadName}}-${version}.zip`
+const baseUrl = `https://www.wowinterface.com`
 
-const pageUrl = ({id, name}: Package) =>
-  `https://www.wowinterface.com/downloads/info${id}-${name}.html`
+const pageUrl = ({ id, hasRetailVersion }: Package) =>
+  hasRetailVersion
+    ? `${baseUrl}/downloads/info${id}`
+    : `${baseUrl}/downloads/landing.php?fileid=${id}`
 
-const extractVersion = (ver: string) => {
-  if (ver.includes("Classic: ")) {
-    const [, version] = ver.split("Classic: ")
-    return version
+async function fetchDownloadUrl(pkg: Package) {
+  const $ = await getDocument(pageUrl(pkg))
+
+  const downloadLink = pkg.hasRetailVersion
+    ? baseUrl + $(`#download > a[title="WoW Classic"]`).attr('href') || ''
+    : $('.manuallink > a').attr('href')
+
+  if (downloadLink !== undefined && downloadLink !== baseUrl) {
+    log.debug(`Found download link for ${pkg.name}: ${downloadLink}`)
+    return downloadLink
   } else {
-    return ver.replace("Version: ", "")
+    log.error(`Unable to find download link for ${pkg.name} at ${pageUrl(pkg)}`)
   }
+}
+
+async function writeFile(link: string) {
+  const [filename, buffer] = await getBuffer(link)
+
+  await fs.mkdir('/tmp/wow-addons', { recursive: true })
+  return fs.writeFile(`/tmp/wow-addons/${filename}`, buffer, {})
 }
 
 async function main() {
-  for (const pkg of packageList) {
-    const $ = await axios.get(pageUrl(pkg))
-      .then(({data}) => cheerio.load(data))
-
-    const version = extractVersion($('#version').text())
-    console.log(version)
-
-    const res = await axios.get(downloadUrl(pkg, version), {
-      responseType: 'arraybuffer',
-      timeout: 30000
-    })
-
-    fs.writeFileSync(`/tmp/${pkg.name}-${version}.zip`, res.data)
-  }
+  const links = await Promise.all(packageList.map(fetchDownloadUrl))
+  Promise.all(compact(links).map(writeFile))
 }
 
-main();
+// main().catch(console.error)
